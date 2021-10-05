@@ -1,0 +1,280 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import aiohttp
+import asyncio
+import nest_asyncio
+nest_asyncio.apply()
+import bs4
+import requests
+import pandas as pd
+from datetime import datetime, timedelta, date, time
+from pytz import timezone
+import http.client
+http.client._MAXHEADERS = 1000
+
+
+# In[2]:
+
+
+def GetStartDateStr():
+    NZ_start_datetime = datetime.now()
+    UTC_start_datetime = datetime.now(timezone('UTC'))
+    UTC_start_string = UTC_start_datetime.strftime("%Y-%m-%d"+"T"+"%H:%M:%S")
+    
+    return UTC_start_string
+
+
+# In[3]:
+
+
+def GetEndDateStr(NZ_end_time, NZ_start_datetime):
+    NZ_end_date_minus1 = NZ_start_datetime.date()
+    NZ_end_date = NZ_end_date_minus1 + timedelta(days = 1)
+    
+    naive_NZ_end_datetime = datetime.combine(NZ_end_date, NZ_end_time)
+    NZ_end_datetime = timezone('Pacific/Auckland').localize(naive_NZ_end_datetime)
+    UTC_end_datetime = NZ_end_datetime.astimezone(timezone('UTC'))
+    
+    UTC_end_str = UTC_end_datetime.strftime("%Y-%m-%d"+"T"+"%H:%M:%S")
+    return UTC_end_str
+
+
+# In[4]:
+
+
+def GetRaceIds(UTC_start_string, UTC_end_str):
+    
+    Home_Url = "https://www.odds.com.au/api/web/public/Meetings/getDataByRangeCacheable/?filter=events,regions,meetings&APIKey=65d5a3e79fcd603b3845f0dc7c2437f0&sportId=21&regionId[]=75&regionId[]=112&rangeStart={}&rangeEnd={}".format(UTC_start_string, UTC_end_str)
+    headers = {
+  'authority': 'www.odds.com.au',
+  'sec-ch-ua': '"Chromium";v="88", "Google Chrome";v="88", ";Not A Brand";v="99"',
+  'accept': 'application/json, text/plain, */*',
+  'dnt': '1',
+  'sec-ch-ua-mobile': '?0',
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.190 Safari/537.36',
+  'sec-fetch-site': 'same-origin',
+  'sec-fetch-mode': 'cors',
+  'sec-fetch-dest': 'empty',
+  'referer': 'https://www.odds.com.au/greyhounds/',
+  'accept-language': 'en-US,en;q=0.9',
+  'cookie': '_ga=GA1.3.1723301145.1614836903; _gid=GA1.3.121255346.1614836904; _hjid=59c950ae-3e9c-4173-ac0d-7935e98db205; _ncg_id_=17336dafe97-3e09efd8-c15b-4e0c-b9c9-bf051bcfc797; nk=c367c4f3755cea8006f851839ee4761d; nc_aam_segs=asgmnt%3D16675898; _gat=1; utag_main=v_id:0177fbc7b12a00170cba7c6438a103073002306b00ac2$_sn:4$_se:1$_ss:1$_st:1614993640078$ses_id:1614991840078%3Bexp-session$_pn:1%3Bexp-session; __atuvc=21%7C9; __atuvs=6042d1de127afc36000; _ncg_sp_ses.cab8=*; AMCVS_5FE61C8B533204850A490D4D%40AdobeOrg=1; AMCV_5FE61C8B533204850A490D4D%40AdobeOrg=1585540135%7CMCIDTS%7C18693%7CMCMID%7C59190957356989207301799330543783425400%7CMCAAMLH-1615596641%7C8%7CMCAAMB-1615596641%7C6G1ynYcLPuiQxYZrsz_pkqfLG9yMXBpb2zX5dvJdYQJzPXImdj0y%7CMCOPTOUT-1614999041s%7CNONE%7CMCSYNCSOP%7C411-18698%7CvVersion%7C4.4.0; _ncg_sp_id.cab8=bdd3fed2-236b-4c55-a8cd-edd0af8e040c.1614836905.4.1614991842.1614915856.fc59d95f-a560-4a5f-9fb5-7548b5ece054'
+}
+    response = requests.get(Home_Url, headers=headers)
+    Data_with_events = response.json()
+
+    Race_Info = {event_dicti['id']: event_dicti['url'][35:-17] for event_dicti in Data_with_events['events']}
+    
+    return Race_Info
+
+
+# In[5]:
+
+
+def GetRaceUrls(Race_Info, BetType):
+    urls = ["https://www.punters.com.au/api/web/public/Odds/getOddsComparisonCacheable/?allowGet=true&APIKey=65d5a3e79fcd603b3845f0dc7c2437f0&eventId={}&betType=Fixed{}".format(Race_ID, BetType) for Race_ID in Race_Info.keys()]
+    return urls
+
+
+# In[6]:
+
+
+async def Fetch(session, url):
+    async with session.get(url) as response:
+        Race_data = await response.json(content_type='text/json')
+        Race_df = await ParseRaceDF(Race_data)
+        return Race_df
+
+
+# In[7]:
+
+
+async def ParseRaceDF(Race_data):
+    List_of_Racer_dfs = []
+    All_numbers = []
+    for Racer in Race_data["selections"]:
+        
+        Name = Racer['name']
+        Number = Racer['competitorNumber']
+        All_numbers.append(Number)
+        Odds_collection = pd.DataFrame({"Name": [Name], "Number": [Number]})
+        for Odds_dicti in Racer['prices']:
+            Bookmaker = Odds_dicti['bookmaker']
+            if Odds_dicti["hasOdds"] == True:
+              try:
+                  Odds = Odds_dicti['odds']
+              except KeyError:
+                  continue
+            else:
+              Odds = 0
+            Odds_collection[Bookmaker] = [Odds]
+
+        List_of_Racer_dfs.append(Odds_collection)
+        
+    Race_df = pd.concat(List_of_Racer_dfs)
+    Race_df["Race"] = Race_data["eventName"]
+    Race_df["Event ID"] = Race_data["eventId"]
+    Race_df["Status"] = Race_data["status"]
+    Race_df['Order'] = range(1, len(Race_df)+1)
+    All_numbers.sort()
+    Race_df["OddsRunners"] = "-".join(All_numbers)
+    
+    return Race_df
+
+
+# In[ ]:
+
+
+
+
+
+# In[8]:
+
+
+def GetOddscheckerUrls(Race_Info):
+    UK_date = datetime.now(timezone('GB')).date()
+    NZ_date = datetime.now(timezone('NZ')).date()
+    
+    dicti = {}
+    if UK_date == NZ_date:
+        for EventID in Race_Info:
+            url = "https://www.oddschecker.com/greyhounds/{}/winner".format(Race_Info[EventID].replace("-nz", ""))
+            dicti[EventID] = url
+            
+    else:
+        for EventID in Race_Info:
+            url = "https://www.oddschecker.com/greyhounds/{}/winner".format(NZ_date.strftime("%Y-%m-%d") + "-" + Race_Info[EventID].replace("-nz", ""))
+            dicti[EventID] = url
+
+    return dicti
+
+
+# In[9]:
+
+
+async def Fetch2(session, EventID, url):
+    async with session.get(url) as response:
+        content = await response.text()
+        B365Runners = await ParseOChecker(content)
+        return EventID, B365Runners
+
+
+# In[10]:
+
+
+async def ParseOChecker(content):
+    soup = bs4.BeautifulSoup(content, "html.parser")
+    Table_rows = soup.find_all(attrs = {"class": "diff-row evTabRow bc"})
+    B365Runners = []
+    for table_row in Table_rows:
+        if table_row.find(attrs = {"data-bk": "B3"})['class'] != ['np', 'o']:
+            B365Runners.append(table_row.find("td").text)
+            
+    B365Runners.sort()
+    return "-".join(B365Runners)
+
+
+# In[11]:
+
+
+def TuplesToDf(Tuples):
+    E_Ids = []
+    B365Runners = []
+    for tupe in Tuples:
+        E_Ids.append(tupe[0])
+        B365Runners.append(tupe[1])
+
+    df = pd.DataFrame({"Event ID": E_Ids, "B365Runners": B365Runners})
+    return df
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+#Main
+async def main():
+    NZ_start_datetime = datetime.now()
+    UTC_start_string = GetStartDateStr()
+
+    NZ_end_time = time(6, 59, 59)
+    UTC_end_str = GetEndDateStr(NZ_end_time, NZ_start_datetime)
+
+
+    Race_Info = GetRaceIds(UTC_start_string, UTC_end_str)
+    Place_Race_Urls = GetRaceUrls(Race_Info, "Place")
+    Win_Race_Urls = GetRaceUrls(Race_Info, "Win")
+    OddscheckerUrls = GetOddscheckerUrls(Race_Info)
+
+    headersos = {
+      'authority': 'www.punters.com.au',
+      'sec-ch-ua': '"Chromium";v="88", "Google Chrome";v="88", ";Not A Brand";v="99"',
+      'accept': 'application/json, text/plain, */*',
+      'dnt': '1',
+      'sec-ch-ua-mobile': '?0',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.190 Safari/537.36',
+      'origin': 'https://www.odds.com.au',
+      'sec-fetch-site': 'cross-site',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-dest': 'empty',
+      'referer': 'https://www.odds.com.au/',
+      'accept-language': 'en-US,en;q=0.9'
+    } 
+    
+    tasks = []
+    async with aiohttp.ClientSession(headers = headersos) as session:
+        for url in Place_Race_Urls:
+            tasks.append(Fetch(session, url))
+            
+        Place_Race_Dfs = await asyncio.gather(*tasks)
+    
+        tasks = []
+        for url in Win_Race_Urls:
+            tasks.append(Fetch(session, url))
+            
+        Win_Race_Dfs = await asyncio.gather(*tasks)
+    
+    
+    tasks = []
+    headers_ochecker = {'User-Agent': 'Chrome/88.0.4324.104'}
+    async with aiohttp.ClientSession(headers = headers_ochecker) as session:
+        for EventID in OddscheckerUrls:
+            tasks.append(Fetch2(session, EventID, OddscheckerUrls[EventID]))
+            
+        Oddschecker_tuples = await asyncio.gather(*tasks)
+        
+    Place_df = pd.concat(Place_Race_Dfs)
+    Win_df = pd.concat(Win_Race_Dfs)
+    DF = pd.merge(Place_df, Win_df, on = ["Name", "Number", "Race", "Event ID", "Status", "Order", "OddsRunners"], suffixes = ["_Place", "_Win"])
+    
+    Oddschecker_df = TuplesToDf(Oddschecker_tuples)
+    
+    DF = pd.merge(DF, Oddschecker_df, on = "Event ID", how = "left")
+
+    DF["Start Date NZ"] = datetime.now().date()
+    
+    DF.to_csv("Open WinPlace Odds {}.csv".format(datetime.now().strftime("%d-%m-%Y %H-%M-%S")))
+    
+    
+asyncio.run(main())
+
